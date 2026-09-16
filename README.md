@@ -1,6 +1,6 @@
 # Adaptive Planner
 
-Adaptive Planner is a local-first macOS planner. This repository contains the usable v0.1 foundation described in `Adaptive_Planner_Proposal.md`.
+Adaptive Planner is a local-first macOS planner. This app is actively being worked on.
 
 ## Run
 
