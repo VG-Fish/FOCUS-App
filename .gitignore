@@ -1,3 +1,12 @@
 Qwen3.6-35B-A3B-OptiQ-4bit-REAP-19B/
 Adaptive_Planner_Proposal.md
 .env
+.venv/
+__pycache__/
+.pytest_cache/
+.DS_Store
+*.py[cod]
+planner.db
+planner.db-*
+backups/
+recordings/

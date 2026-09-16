@@ -1,0 +1,2 @@
+[console_scripts]
+adaptive-planner = adaptive_planner.main:main

@@ -1,0 +1,8 @@
+alembic<2,>=1.14
+pydantic<3,>=2.9
+pyside6<7,>=6.8
+python-dateutil<3,>=2.9
+sqlalchemy<3,>=2.0
+
+[:sys_platform == "darwin"]
+pyobjc-framework-Cocoa>=10

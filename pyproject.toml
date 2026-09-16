@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adaptive-planner"
+version = "0.1.0"
+description = "A local-first adaptive planner for macOS"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.14,<2",
+    "pydantic>=2.9,<3",
+    "pyside6>=6.8,<7",
+    "pyobjc-framework-Cocoa>=10; sys_platform == 'darwin'",
+    "python-dateutil>=2.9,<3",
+    "sqlalchemy>=2.0,<3",
+]
+
+[project.scripts]
+adaptive-planner = "adaptive_planner.main:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-qt>=4.4,<5",
+    "ty>=0.0.1a3",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
