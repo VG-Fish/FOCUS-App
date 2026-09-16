@@ -61,6 +61,17 @@ QLabel#sectionTitle {
 QLabel#sectionMeta, QLabel#mutedText, QLabel#taskMeta {
     color: #667085;
 }
+QLabel#taskSummary {
+    color: #344054;
+    font-weight: 600;
+}
+QLabel#debugError {
+    background: #fef3f2;
+    border: 1px solid #fecdca;
+    border-radius: 6px;
+    color: #b42318;
+    padding: 7px 9px;
+}
 QLabel#calendarPeriod {
     color: #172033;
     font-size: 15px;
@@ -215,6 +226,24 @@ QLineEdit, QTextEdit, QSpinBox, QDateEdit, QDateTimeEdit, QComboBox, QListWidget
 QLineEdit:focus, QTextEdit:focus, QSpinBox:focus, QDateEdit:focus,
 QDateTimeEdit:focus, QComboBox:focus, QListWidget:focus, QTableWidget:focus {
     border: 1px solid #4f7ff0;
+}
+QTextEdit[invalid="true"] {
+    border: 2px solid #d92d20;
+}
+QCheckBox {
+    color: #172033;
+    spacing: 8px;
+}
+QCheckBox::indicator {
+    width: 17px;
+    height: 17px;
+    border: 1px solid #98a2b3;
+    border-radius: 4px;
+    background: #ffffff;
+}
+QCheckBox::indicator:checked {
+    background: #2563eb;
+    border-color: #2563eb;
 }
 QSpinBox, QDateEdit, QDateTimeEdit {
     padding-right: 22px;

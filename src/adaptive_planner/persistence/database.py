@@ -85,22 +85,47 @@ class DatabaseWorker:
     def _backup_before_migration(self) -> None:
         if not self.db_path.exists() or self.db_path.stat().st_size == 0:
             return
-        backup_dir = self.db_path.parent / "backups"
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        destination = backup_dir / f"{self.db_path.name}.{stamp}.bak"
         source = sqlite3.connect(self.db_path)
         try:
-            target = sqlite3.connect(destination)
-            try:
-                source.backup(target)
-            finally:
-                target.close()
+            self._backup_connection(source)
         finally:
             source.close()
-        backups = sorted(backup_dir.glob(f"{self.db_path.name}.*.bak"), key=lambda path: path.stat().st_mtime, reverse=True)
+
+    def _backup_connection(self, source: sqlite3.Connection) -> Path:
+        backup_dir = self.db_path.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ%f")
+        destination = backup_dir / f"{self.db_path.name}.{stamp}.bak"
+        temporary = destination.with_suffix(".tmp")
+        target = sqlite3.connect(temporary)
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+        temporary.replace(destination)
+        backups = sorted(
+            backup_dir.glob(f"{self.db_path.name}.*.bak"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
         for old_backup in backups[self.backup_count :]:
             old_backup.unlink(missing_ok=True)
+        return destination
+
+    def backup_now(self) -> Path:
+        """Create a consistent SQLite backup through the database worker."""
+
+        def backup(session: Session) -> Path:
+            session.flush()
+            raw_connection = session.connection().connection
+            # SQLAlchemy 2 exposes a ConnectionFairy here; its driver
+            # connection is the sqlite3.Connection that owns the WAL state.
+            source = getattr(raw_connection, "driver_connection", raw_connection)
+            if not isinstance(source, sqlite3.Connection):
+                raise RuntimeError("the active database connection is not SQLite")
+            return self._backup_connection(source)
+
+        return self.call(backup)
 
     def call(self, callback: Callable[[Session], T]) -> T:
         if not self._thread.is_alive():

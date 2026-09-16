@@ -41,6 +41,9 @@ class PlannerApp:
     def close(self) -> None:
         self.database.close()
 
+    def backup_now(self) -> Path:
+        return self.database.backup_now()
+
     def get_preferences(self) -> PlannerPreferencesDocument:
         return self.database.call(CoreStore.get_preferences)
 
@@ -56,8 +59,14 @@ class PlannerApp:
     def rename_area(self, area_id: UUID, name: str) -> AreaDTO:
         return self.database.call(lambda session: CoreStore.rename_area(session, area_id, name))
 
+    def update_area(self, area_id: UUID, data: AreaCreate) -> AreaDTO:
+        return self.database.call(lambda session: CoreStore.update_area(session, area_id, data))
+
     def archive_area(self, area_id: UUID, action: str = "area_only", destination_area_id: UUID | None = None) -> None:
         self.database.call(lambda session: CoreStore.archive_area(session, area_id, action, destination_area_id))
+
+    def restore_area(self, area_id: UUID) -> AreaDTO:
+        return self.database.call(lambda session: CoreStore.restore_area(session, area_id))
 
     def list_tasks(
         self,
@@ -84,17 +93,41 @@ class PlannerApp:
     def complete_task(self, task_id: UUID) -> TaskDTO:
         return self.database.call(lambda session: CoreStore.complete_task(session, task_id))
 
+    def reopen_task(self, task_id: UUID) -> TaskDTO:
+        return self.database.call(lambda session: CoreStore.reopen_task(session, task_id))
+
     def archive_task(self, task_id: UUID) -> TaskDTO:
         return self.database.call(lambda session: CoreStore.archive_task(session, task_id))
+
+    def restore_task(self, task_id: UUID) -> TaskDTO:
+        return self.database.call(lambda session: CoreStore.restore_task(session, task_id))
 
     def adjust_remaining(self, task_id: UUID, minutes: int | None) -> TaskDTO:
         return self.database.call(lambda session: CoreStore.adjust_remaining(session, task_id, minutes))
 
-    def defer_task(self, task_id: UUID, earliest_start_at: datetime) -> TaskDTO:
+    def adjust_remaining_seconds(self, task_id: UUID, seconds: int | None) -> TaskDTO:
+        return self.database.call(lambda session: CoreStore.adjust_remaining_seconds(session, task_id, seconds))
+
+    def defer_task(self, task_id: UUID, earliest_start_at: datetime | None) -> TaskDTO:
         return self.database.call(lambda session: CoreStore.defer_task(session, task_id, earliest_start_at))
 
-    def list_events(self, *, start: datetime | None = None, end: datetime | None = None) -> tuple[CalendarEventDTO, ...]:
-        return self.database.call(lambda session: CoreStore.list_events(session, start=start, end=end))
+    def list_events(
+        self,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        include_cancelled: bool = False,
+        include_archived: bool = False,
+    ) -> tuple[CalendarEventDTO, ...]:
+        return self.database.call(
+            lambda session: CoreStore.list_events(
+                session,
+                start=start,
+                end=end,
+                include_cancelled=include_cancelled,
+                include_archived=include_archived,
+            )
+        )
 
     def create_event(self, data: CalendarEventCreate) -> CalendarEventDTO:
         return self.database.call(lambda session: CoreStore.create_event(session, data))
@@ -104,6 +137,12 @@ class PlannerApp:
 
     def cancel_event(self, event_id: UUID) -> CalendarEventDTO:
         return self.database.call(lambda session: CoreStore.cancel_event(session, event_id))
+
+    def archive_event(self, event_id: UUID) -> CalendarEventDTO:
+        return self.database.call(lambda session: CoreStore.archive_event(session, event_id))
+
+    def restore_event(self, event_id: UUID) -> CalendarEventDTO:
+        return self.database.call(lambda session: CoreStore.restore_event(session, event_id))
 
     def block_time(self, title: str, start_at: datetime, end_at: datetime, description: str | None = None) -> CalendarEventDTO:
         return self.create_event(
@@ -140,7 +179,7 @@ class PlannerApp:
                 title=parsed.title,
                 deadline_kind=deadline_kind,
                 due_date=parsed.due_date,
-                estimated_remaining_minutes=parsed.estimate_minutes,
+                estimated_remaining_seconds=None if parsed.estimate_minutes is None else parsed.estimate_minutes * 60,
             )
         )
 
@@ -154,7 +193,4 @@ class PlannerApp:
         return task
 
     def inspect_event(self, event_id: UUID) -> CalendarEventDTO:
-        event = next((item for item in self.list_events() if item.id == event_id), None)
-        if event is None:
-            raise ValueError("CalendarEvent not found")
-        return event
+        return self.database.call(lambda session: CoreStore.get_event(session, event_id))

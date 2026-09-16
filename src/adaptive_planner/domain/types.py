@@ -42,7 +42,7 @@ class PostDuePolicy(StrEnum):
 
 
 class FrozenModel(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid", validate_assignment=True)
+    model_config = ConfigDict(frozen=True, extra="forbid", validate_assignment=True, populate_by_name=True)
 
 
 def utc_now() -> datetime:
@@ -121,12 +121,11 @@ class TaskDTO(FrozenModel):
     area_id: UUID
     title: str
     description: str | None
-    notes: str | None
     earliest_start_at: datetime | None
     deadline_kind: DeadlineKind
     due_date: date | None
     due_at: datetime | None
-    estimated_remaining_minutes: int | None
+    estimated_remaining_seconds: int | None
     priority: int
     can_split: bool
     minimum_block_minutes_override: int | None
@@ -137,22 +136,40 @@ class TaskDTO(FrozenModel):
     created_at: datetime
     updated_at: datetime
 
+    @property
+    def estimated_remaining_minutes(self) -> int | float | None:
+        """Compatibility view for callers written before second-level storage."""
+
+        if self.estimated_remaining_seconds is None:
+            return None
+        minutes, seconds = divmod(self.estimated_remaining_seconds, 60)
+        return minutes if seconds == 0 else self.estimated_remaining_seconds / 60
+
 
 class TaskCreate(FrozenModel):
     area_id: UUID
     title: str = Field(min_length=1, max_length=300)
     description: str | None = None
-    notes: str | None = None
     earliest_start_at: datetime | None = None
     deadline_kind: DeadlineKind = DeadlineKind.NONE
     due_date: date | None = None
     due_at: datetime | None = None
-    estimated_remaining_minutes: int | None = Field(default=None, ge=0)
+    estimated_remaining_seconds: int | None = Field(default=None, ge=0)
     priority: int = Field(default=3, ge=1, le=5)
     can_split: bool = True
     minimum_block_minutes_override: int | None = Field(default=None, gt=0)
     maximum_block_minutes_override: int | None = Field(default=None, gt=0)
     post_due_policy_override: PostDuePolicy | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_minute_estimate(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "estimated_remaining_minutes" in data:
+            migrated = dict(data)
+            minutes = migrated.pop("estimated_remaining_minutes")
+            migrated.setdefault("estimated_remaining_seconds", None if minutes is None else int(minutes * 60))
+            return migrated
+        return data
 
     @field_validator("title")
     @classmethod
@@ -185,18 +202,27 @@ class TaskCreate(FrozenModel):
 class TaskUpdate(FrozenModel):
     title: str | None = Field(default=None, min_length=1, max_length=300)
     description: str | None = None
-    notes: str | None = None
     area_id: UUID | None = None
     earliest_start_at: datetime | None = None
     deadline_kind: DeadlineKind | None = None
     due_date: date | None = None
     due_at: datetime | None = None
-    estimated_remaining_minutes: int | None = Field(default=None, ge=0)
+    estimated_remaining_seconds: int | None = Field(default=None, ge=0)
     priority: int | None = Field(default=None, ge=1, le=5)
     can_split: bool | None = None
     minimum_block_minutes_override: int | None = Field(default=None, gt=0)
     maximum_block_minutes_override: int | None = Field(default=None, gt=0)
     post_due_policy_override: PostDuePolicy | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_minute_estimate(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "estimated_remaining_minutes" in data:
+            migrated = dict(data)
+            minutes = migrated.pop("estimated_remaining_minutes")
+            migrated.setdefault("estimated_remaining_seconds", None if minutes is None else int(minutes * 60))
+            return migrated
+        return data
 
     @field_validator("title")
     @classmethod
@@ -224,6 +250,7 @@ class CalendarEventDTO(FrozenModel):
     cancelled_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    archived_at: datetime | None = None
 
 
 class CalendarEventCreate(FrozenModel):

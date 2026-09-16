@@ -89,6 +89,46 @@ class _PickerDialog(QDialog):
         return time(hour, int(self.minute.currentText()))
 
 
+class _TimePickerDialog(QDialog):
+    def __init__(self, selected_time: time, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Choose time")
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
+
+        row = QHBoxLayout()
+        self.hour = QComboBox()
+        self.hour.addItems([str(value) for value in range(1, 13)])
+        self.minute = QComboBox()
+        self.minute.addItems([f"{value:02d}" for value in range(60)])
+        self.meridiem = QComboBox()
+        self.meridiem.addItems(["AM", "PM"])
+        self.hour.setCurrentText(str(selected_time.hour % 12 or 12))
+        self.minute.setCurrentText(f"{selected_time.minute:02d}")
+        self.meridiem.setCurrentText("PM" if selected_time.hour >= 12 else "AM")
+        row.addWidget(self.hour)
+        row.addWidget(QLabel(":"))
+        row.addWidget(self.minute)
+        row.addWidget(self.meridiem)
+        layout.addLayout(row)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @property
+    def value(self) -> time:
+        hour = int(self.hour.currentText()) % 12
+        if self.meridiem.currentText() == "PM":
+            hour += 12
+        return time(hour, int(self.minute.currentText()))
+
+
 class DatePickerButton(QPushButton):
     """A non-editable date field that always opens a calendar picker."""
 
@@ -154,3 +194,34 @@ class DateTimePickerButton(QPushButton):
     def _update_label(self) -> None:
         local = self._value.astimezone(self.zone)
         self.setText(f"{local.strftime('%a, %b %-d, %Y  •  %-I:%M %p')}  ▾")
+
+
+class TimePickerButton(QPushButton):
+    """A non-editable wall-clock time field that opens a compact picker."""
+
+    valueChanged = Signal(object)
+
+    def __init__(self, value: time, parent=None) -> None:
+        super().__init__(parent)
+        self._value = value.replace(second=0, microsecond=0)
+        self.setObjectName("pickerButton")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clicked.connect(self._choose)
+        self._update_label()
+
+    @property
+    def value(self) -> time:
+        return self._value
+
+    def set_value(self, value: time) -> None:
+        self._value = value.replace(second=0, microsecond=0)
+        self._update_label()
+
+    def _choose(self) -> None:
+        dialog = _TimePickerDialog(self._value, self)
+        if dialog.exec():
+            self.set_value(dialog.value)
+            self.valueChanged.emit(self._value)
+
+    def _update_label(self) -> None:
+        self.setText(f"{self._value.strftime('%-I:%M %p')}  ▾")

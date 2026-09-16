@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from calendar import monthrange
 from datetime import date, datetime, time, timedelta, timezone
+from math import ceil, floor
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -11,7 +12,9 @@ from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QApplication,
     QFrame,
+    QGraphicsItem,
     QGraphicsScene,
     QGraphicsView,
     QHBoxLayout,
@@ -48,9 +51,15 @@ BUSY_TEXT = QColor("#1849a9")
 FREE_FILL = QColor("#f4f6f8")
 FREE_BORDER = QColor("#aeb8c7")
 FREE_TEXT = QColor("#475467")
+ARCHIVED_FILL = QColor("#f2f4f7")
+ARCHIVED_BORDER = QColor("#98a2b3")
+ARCHIVED_TEXT = QColor("#667085")
 SELECTED_BORDER = QColor("#173d8f")
 NOW = QColor("#d92d20")
+DRAG_FILL = QColor(37, 99, 235, 70)
 EVENT_DATA_ROLE = 0
+EVENT_RECT_ROLE = 1
+SNAP_MINUTES = 15
 
 
 def _font(size: int, *, bold: bool = False) -> QFont:
@@ -65,6 +74,8 @@ def _elide(text: str, width: float, font: QFont) -> str:
 
 
 def _event_colors(event: CalendarEventDTO) -> tuple[QColor, QColor, QColor]:
+    if event.archived_at is not None:
+        return ARCHIVED_FILL, ARCHIVED_BORDER, ARCHIVED_TEXT
     if event.availability is Availability.FREE:
         return FREE_FILL, FREE_BORDER, FREE_TEXT
     return BUSY_FILL, BUSY_BORDER, BUSY_TEXT
@@ -83,6 +94,7 @@ def _add_event_chip(
     outline = SELECTED_BORDER if selected else border
     box = scene.addRect(rect, QPen(outline, 2 if selected else 1), QBrush(fill))
     box.setData(EVENT_DATA_ROLE, str(event.id))
+    box.setData(EVENT_RECT_ROLE, QRectF(rect))
     box.setToolTip(label)
     font = _font(10 if compact else 11, bold=True)
     shown = _elide(label, rect.width() - 10, font)
@@ -90,6 +102,7 @@ def _add_event_chip(
     text_item.setBrush(QBrush(foreground))
     text_item.setPos(rect.x() + 5, rect.y() + (2 if compact else 4))
     text_item.setData(EVENT_DATA_ROLE, str(event.id))
+    text_item.setData(EVENT_RECT_ROLE, QRectF(rect))
     text_item.setToolTip(label)
 
 
@@ -140,6 +153,9 @@ class _DayHeaderView(_EventGraphicsView):
 
 class _TimeCanvas(_EventGraphicsView):
     emptyDoubleClicked = Signal(object, object)
+    rangeDragged = Signal(object, object)
+    eventMoveRequested = Signal(str, object, object)
+    eventResizeRequested = Signal(str, object, object)
     HOUR_HEIGHT = 52
     GUTTER = 62
 
@@ -149,6 +165,295 @@ class _TimeCanvas(_EventGraphicsView):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self._press_position: QPoint | None = None
+        self._selection_column: int | None = None
+        self._selection_press_minute: float | None = None
+        self._drag_event: CalendarEventDTO | None = None
+        self._drag_grab_offset = timedelta(0)
+        self._drag_operation: str | None = None
+        self._drag_active = False
+        self._preview_items: list[QGraphicsItem] = []
+
+    def _event_interaction_at(self, point: QPoint) -> tuple[str | None, str | None]:
+        """Return the event and whether this point moves or resizes it."""
+
+        event_id = self._event_id_at(point)
+        if event_id is None:
+            return None, None
+        event_rect = None
+        for item in self.items(point):
+            if str(item.data(EVENT_DATA_ROLE) or "") != event_id:
+                continue
+            candidate = item.data(EVENT_RECT_ROLE)
+            if isinstance(candidate, QRectF):
+                event_rect = candidate
+                break
+        if event_rect is None:
+            return event_id, "move"
+
+        scene_y = self.mapToScene(point).y()
+        edge_size = min(8.0, max(4.0, event_rect.height() / 3))
+        if abs(scene_y - event_rect.top()) <= edge_size:
+            return event_id, "resize_start"
+        if abs(scene_y - event_rect.bottom()) <= edge_size:
+            return event_id, "resize_end"
+        return event_id, "move"
+
+    def _grid_position(self, point: QPoint, *, clamp_column: bool = False) -> tuple[int, float] | None:
+        scene_point = self.mapToScene(point)
+        days = self.owner.visible.days
+        usable_width = max(1.0, self.sceneRect().width() - self.GUTTER)
+        column_width = usable_width / len(days)
+        raw_column = int(floor((scene_point.x() - self.GUTTER) / column_width))
+        if clamp_column:
+            column = max(0, min(len(days) - 1, raw_column))
+        elif raw_column < 0 or raw_column >= len(days):
+            return None
+        else:
+            column = raw_column
+        minute = max(0.0, min(24 * 60 - 0.001, scene_point.y() / self.HOUR_HEIGHT * 60))
+        return column, minute
+
+    @staticmethod
+    def _selection_range(first_minute: float, second_minute: float) -> tuple[int, int]:
+        start = max(0, floor(min(first_minute, second_minute) / SNAP_MINUTES) * SNAP_MINUTES)
+        end = min(24 * 60, ceil(max(first_minute, second_minute) / SNAP_MINUTES) * SNAP_MINUTES)
+        if end <= start:
+            end = min(24 * 60, start + SNAP_MINUTES)
+        return start, end
+
+    def _local_at(self, column: int, minute: float) -> datetime:
+        day = self.owner.visible.days[column]
+        return datetime.combine(day, time.min, tzinfo=self.owner.zone) + timedelta(minutes=minute)
+
+    @staticmethod
+    def _snap_local(value: datetime) -> datetime:
+        seconds = value.hour * 3600 + value.minute * 60 + value.second + value.microsecond / 1_000_000
+        snapped_seconds = int((seconds + SNAP_MINUTES * 30) // (SNAP_MINUTES * 60)) * SNAP_MINUTES * 60
+        return datetime.combine(value.date(), time.min, tzinfo=value.tzinfo) + timedelta(seconds=snapped_seconds)
+
+    def _clear_preview(self) -> None:
+        for item in self._preview_items:
+            if item.scene() is not None:
+                item.scene().removeItem(item)
+        self._preview_items.clear()
+
+    def _show_preview(self, rect: QRectF, label: str) -> None:
+        self._clear_preview()
+        self._add_preview(rect, label)
+
+    def _add_preview(self, rect: QRectF, label: str) -> None:
+        scene = self.scene()
+        if scene is None:
+            return
+        box = scene.addRect(rect, QPen(TODAY, 2, Qt.PenStyle.DashLine), QBrush(DRAG_FILL))
+        box.setZValue(100)
+        font = _font(10, bold=True)
+        text_item = scene.addSimpleText(_elide(label, rect.width() - 10, font), font)
+        text_item.setBrush(QBrush(SELECTED_BORDER))
+        text_item.setPos(rect.x() + 5, rect.y() + 4)
+        text_item.setZValue(101)
+        self._preview_items.extend((box, text_item))
+
+    def _show_event_range_preview(self, start: datetime, end: datetime) -> None:
+        if self._drag_event is None:
+            return
+        self._clear_preview()
+        local_start = start.astimezone(self.owner.zone)
+        local_end = end.astimezone(self.owner.zone)
+        days = self.owner.visible.days
+        column_width = (self.sceneRect().width() - self.GUTTER) / len(days)
+        if local_start.date() == local_end.date():
+            label = (
+                f"{local_start.strftime('%-I:%M %p')} – "
+                f"{local_end.strftime('%-I:%M %p')}  {self._drag_event.title}"
+            )
+        else:
+            label = f"{local_start.strftime('%a %-I:%M %p')} – {local_end.strftime('%a %-I:%M %p')}"
+
+        for column, day in enumerate(days):
+            day_start = datetime.combine(day, time.min, tzinfo=self.owner.zone)
+            day_end = datetime.combine(day + timedelta(days=1), time.min, tzinfo=self.owner.zone)
+            segment_start = max(local_start, day_start)
+            segment_end = min(local_end, day_end)
+            if segment_end <= segment_start:
+                continue
+            start_minute = (
+                segment_start.hour * 60
+                + segment_start.minute
+                + segment_start.second / 60
+            )
+            end_minute = (
+                24 * 60
+                if segment_end == day_end
+                else segment_end.hour * 60 + segment_end.minute + segment_end.second / 60
+            )
+            left = self.GUTTER + column * column_width
+            top = start_minute / 60 * self.HOUR_HEIGHT
+            height = max(20.0, (end_minute - start_minute) / 60 * self.HOUR_HEIGHT - 2)
+            self._add_preview(
+                QRectF(left + 3, top + 1, column_width - 6, height),
+                label,
+            )
+
+    def _selection_preview(self, current_minute: float) -> tuple[datetime, datetime] | None:
+        if self._selection_column is None or self._selection_press_minute is None:
+            return None
+        start_minute, end_minute = self._selection_range(self._selection_press_minute, current_minute)
+        days = self.owner.visible.days
+        column_width = (self.sceneRect().width() - self.GUTTER) / len(days)
+        left = self.GUTTER + self._selection_column * column_width
+        top = start_minute / 60 * self.HOUR_HEIGHT
+        height = (end_minute - start_minute) / 60 * self.HOUR_HEIGHT
+        start = self._local_at(self._selection_column, start_minute)
+        end = self._local_at(self._selection_column, end_minute)
+        label = f"{start.strftime('%-I:%M %p')} – {end.strftime('%-I:%M %p')}"
+        self._show_preview(QRectF(left + 2, top + 1, column_width - 4, max(12.0, height - 2)), label)
+        return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+
+    def _event_move_range(self, point: QPoint) -> tuple[datetime, datetime] | None:
+        if self._drag_event is None or self._drag_event.start_at is None or self._drag_event.end_at is None:
+            return None
+        position = self._grid_position(point, clamp_column=True)
+        if position is None:
+            return None
+        column, minute = position
+        cursor_at = self._local_at(column, minute).astimezone(timezone.utc)
+        candidate = (cursor_at - self._drag_grab_offset).astimezone(self.owner.zone)
+        local_start = self._snap_local(candidate)
+        start = local_start.astimezone(timezone.utc)
+        end = start + (self._drag_event.end_at - self._drag_event.start_at)
+        self._show_event_range_preview(start, end)
+        return start, end
+
+    def _event_resize_range(self, point: QPoint) -> tuple[datetime, datetime] | None:
+        source = self._drag_event
+        if source is None or source.start_at is None or source.end_at is None:
+            return None
+        position = self._grid_position(point, clamp_column=True)
+        if position is None:
+            return None
+        column, minute = position
+        candidate = self._snap_local(self._local_at(column, minute)).astimezone(timezone.utc)
+        minimum_duration = timedelta(minutes=SNAP_MINUTES)
+        if self._drag_operation == "resize_start":
+            start = min(candidate, source.end_at - minimum_duration)
+            end = source.end_at
+        elif self._drag_operation == "resize_end":
+            start = source.start_at
+            end = max(candidate, source.start_at + minimum_duration)
+        else:
+            return None
+        self._show_event_range_preview(start, end)
+        return start, end
+
+    def _reset_drag(self) -> None:
+        self._clear_preview()
+        self._press_position = None
+        self._selection_column = None
+        self._selection_press_minute = None
+        self._drag_event = None
+        self._drag_grab_offset = timedelta(0)
+        self._drag_operation = None
+        self._drag_active = False
+        self.viewport().unsetCursor()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        point = event.position().toPoint()
+        event_id, operation = self._event_interaction_at(point)
+        self.eventClicked.emit(event_id or "")
+        self._reset_drag()
+        self._press_position = point
+        position = self._grid_position(point)
+        if event_id:
+            source = self.owner.event_for_id(event_id)
+            if source is not None and source.start_at is not None and source.end_at is not None and position is not None:
+                column, minute = position
+                cursor_at = self._local_at(column, minute).astimezone(timezone.utc)
+                self._drag_event = source
+                self._drag_operation = operation
+                self._drag_grab_offset = cursor_at - source.start_at
+                cursor = (
+                    Qt.CursorShape.SizeVerCursor
+                    if operation in ("resize_start", "resize_end")
+                    else Qt.CursorShape.OpenHandCursor
+                )
+                self.viewport().setCursor(cursor)
+        elif position is not None:
+            self._selection_column, self._selection_press_minute = position
+            self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:
+        point = event.position().toPoint()
+        if self._press_position is None or not (event.buttons() & Qt.MouseButton.LeftButton):
+            event_id, operation = self._event_interaction_at(point)
+            if operation in ("resize_start", "resize_end"):
+                cursor = Qt.CursorShape.SizeVerCursor
+            elif event_id:
+                cursor = Qt.CursorShape.OpenHandCursor
+            else:
+                cursor = Qt.CursorShape.ArrowCursor
+            self.viewport().setCursor(cursor)
+            super().mouseMoveEvent(event)
+            return
+        if not self._drag_active:
+            distance = (point - self._press_position).manhattanLength()
+            if distance < QApplication.startDragDistance():
+                event.accept()
+                return
+            self._drag_active = True
+        if point.y() < 24:
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - 12)
+        elif point.y() > self.viewport().height() - 24:
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() + 12)
+        if self._drag_event is not None:
+            if self._drag_operation in ("resize_start", "resize_end"):
+                self.viewport().setCursor(Qt.CursorShape.SizeVerCursor)
+                self._event_resize_range(point)
+            else:
+                self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+                self._event_move_range(point)
+        else:
+            position = self._grid_position(point, clamp_column=True)
+            if position is not None:
+                self._selection_preview(position[1])
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() != Qt.MouseButton.LeftButton or self._press_position is None:
+            super().mouseReleaseEvent(event)
+            return
+        point = event.position().toPoint()
+        dragged = self._drag_active
+        source = self._drag_event
+        operation = self._drag_operation
+        if dragged and source is not None:
+            changed = (
+                self._event_resize_range(point)
+                if operation in ("resize_start", "resize_end")
+                else self._event_move_range(point)
+            )
+            self._reset_drag()
+            if changed is not None and (changed[0] != source.start_at or changed[1] != source.end_at):
+                signal = (
+                    self.eventResizeRequested
+                    if operation in ("resize_start", "resize_end")
+                    else self.eventMoveRequested
+                )
+                signal.emit(str(source.id), changed[0], changed[1])
+        elif dragged:
+            position = self._grid_position(point, clamp_column=True)
+            selected = self._selection_preview(position[1]) if position is not None else None
+            self._reset_drag()
+            if selected is not None:
+                self.rangeDragged.emit(*selected)
+        else:
+            self._reset_drag()
+        event.accept()
 
     def mouseDoubleClickEvent(self, event) -> None:
         point = event.position().toPoint()
@@ -180,6 +485,9 @@ class TimeGridCalendar(QWidget):
     eventClicked = Signal(str)
     eventDoubleClicked = Signal(str)
     emptyDoubleClicked = Signal(object, object)
+    rangeDragged = Signal(object, object)
+    eventMoveRequested = Signal(str, object, object)
+    eventResizeRequested = Signal(str, object, object)
 
     def __init__(self, mode: CalendarMode, parent=None) -> None:
         super().__init__(parent)
@@ -190,6 +498,7 @@ class TimeGridCalendar(QWidget):
         self.timezone_name = "UTC"
         self.zone = ZoneInfo("UTC")
         self.events: tuple[CalendarEventDTO, ...] = ()
+        self._events_by_id: dict[str, CalendarEventDTO] = {}
         self.selected_id: UUID | None = None
         self._needs_initial_scroll = True
 
@@ -203,6 +512,9 @@ class TimeGridCalendar(QWidget):
         self.canvas.eventClicked.connect(self.eventClicked)
         self.canvas.eventDoubleClicked.connect(self.eventDoubleClicked)
         self.canvas.emptyDoubleClicked.connect(self.emptyDoubleClicked)
+        self.canvas.rangeDragged.connect(self.rangeDragged)
+        self.canvas.eventMoveRequested.connect(self.eventMoveRequested)
+        self.canvas.eventResizeRequested.connect(self.eventResizeRequested)
         layout.addWidget(self.header)
         layout.addWidget(self.canvas, 1)
 
@@ -222,11 +534,15 @@ class TimeGridCalendar(QWidget):
         self.timezone_name = timezone_name
         self.zone = ZoneInfo(timezone_name)
         self.events = events
+        self._events_by_id = {str(event.id): event for event in events}
         self.selected_id = selected_id
         self._needs_initial_scroll = self._needs_initial_scroll or anchor_changed
         self._render()
         if self._needs_initial_scroll:
             QTimer.singleShot(0, self._scroll_to_useful_time)
+
+    def event_for_id(self, event_id: str) -> CalendarEventDTO | None:
+        return self._events_by_id.get(event_id)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -469,6 +785,8 @@ class CalendarView(QWidget):
     rangeChanged = Signal()
     eventSelected = Signal(object)
     eventEditRequested = Signal(object)
+    eventMoveRequested = Signal(object, object, object)
+    eventResizeRequested = Signal(object, object, object)
     blockTimeRequested = Signal(object, object)
 
     def __init__(self, parent=None) -> None:
@@ -542,6 +860,10 @@ class CalendarView(QWidget):
             view.eventClicked.connect(self._select_event)
             view.eventDoubleClicked.connect(self._request_event_edit)
             view.emptyDoubleClicked.connect(self.blockTimeRequested)
+            if isinstance(view, TimeGridCalendar):
+                view.rangeDragged.connect(self.blockTimeRequested)
+                view.eventMoveRequested.connect(self._request_event_move)
+                view.eventResizeRequested.connect(self._request_event_resize)
             self.stack.addWidget(view)
         layout.addWidget(self.stack, 1)
 
@@ -611,11 +933,25 @@ class CalendarView(QWidget):
 
     def _request_event_edit(self, event_id: str) -> None:
         event = self._events_by_id.get(UUID(event_id))
-        if event is not None:
+        if event is not None and event.archived_at is None:
             self.selected_event = event
             self.eventSelected.emit(event)
             self._update_views()
             self.eventEditRequested.emit(event)
+
+    def _request_event_move(self, event_id: str, start: datetime, end: datetime) -> None:
+        event = self._events_by_id.get(UUID(event_id))
+        if event is not None and event.archived_at is None and event.start_at is not None and event.end_at is not None:
+            self.selected_event = event
+            self.eventSelected.emit(event)
+            self.eventMoveRequested.emit(event, start, end)
+
+    def _request_event_resize(self, event_id: str, start: datetime, end: datetime) -> None:
+        event = self._events_by_id.get(UUID(event_id))
+        if event is not None and event.archived_at is None and event.start_at is not None and event.end_at is not None:
+            self.selected_event = event
+            self.eventSelected.emit(event)
+            self.eventResizeRequested.emit(event, start, end)
 
     def _update_views(self) -> None:
         self.period_label.setText(period_title(self.anchor, self.mode))
@@ -625,4 +961,8 @@ class CalendarView(QWidget):
         view.set_data(self.anchor, self.timezone_name, self.events, selected_id)
         self.stack.setCurrentWidget(view)
         noun = "event" if len(self.events) == 1 else "events"
-        self.hint.setText(f"{len(self.events)} {noun} in view  •  Double-click empty space to block time")
+        if self.mode in (CalendarMode.DAY, CalendarMode.WEEK):
+            guidance = "Drag empty space to block time  •  Drag a timed block to move it  •  Drag its top or bottom edge to resize"
+        else:
+            guidance = "Double-click a day to block time"
+        self.hint.setText(f"{len(self.events)} {noun} in view  •  {guidance}")

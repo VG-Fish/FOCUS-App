@@ -68,7 +68,7 @@ class Area(TimestampMixin, Base):
 class Task(TimestampMixin, Base):
     __tablename__ = "tasks"
     __table_args__ = (
-        CheckConstraint("estimated_remaining_minutes IS NULL OR estimated_remaining_minutes >= 0", name="ck_tasks_estimate"),
+        CheckConstraint("estimated_remaining_seconds IS NULL OR estimated_remaining_seconds >= 0", name="ck_tasks_estimate"),
         CheckConstraint("priority BETWEEN 1 AND 5", name="ck_tasks_priority"),
         CheckConstraint(
             "(deadline_kind = 'NONE' AND due_date IS NULL AND due_at IS NULL) OR "
@@ -104,12 +104,11 @@ class Task(TimestampMixin, Base):
     area_id: Mapped[str] = mapped_column(String(36), ForeignKey("areas.id", ondelete="RESTRICT"), nullable=False)
     title: Mapped[str] = mapped_column(String(300), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     earliest_start_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     deadline_kind: Mapped[str] = mapped_column(String(16), nullable=False, default="NONE")
     due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     due_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    estimated_remaining_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    estimated_remaining_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     can_split: Mapped[bool] = mapped_column(nullable=False, default=True)
     minimum_block_minutes_override: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -155,6 +154,7 @@ class CalendarEvent(TimestampMixin, Base):
     end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     timezone_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class HistoryEvent(Base):
